@@ -18,6 +18,8 @@ services:
       - DIAL_PORT=8098
       - STREAM_PORT=8099
       - HOST_IP=auto
+      - AUTO_STOP_ON_SPEAKER_OFF=true
+      - AUTO_STOP_ON_DISCONNECT=true
       - DATA_DIR=/app/data
     volumes:
       - ./config.json:/app/config.json

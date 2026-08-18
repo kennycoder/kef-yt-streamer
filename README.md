@@ -14,6 +14,9 @@ A lightweight Cast Receiver bridge that lets you cast songs, albums, and playlis
   - Volume Control & Mute synchronization
   - Next / Previous track
 - **Continuous Album & Playlist Playback**: Automatically monitors speaker playback state and advances to the next song in your queue.
+- **Smart Two-Way Playback Synchronization**:
+  - **Speaker Power / State Feedback**: Automatically detects when speakers are powered off, put in standby, paused via remote, or switched to another input, and notifies your phone to stop playback while terminating server audio streams.
+  - **Device Switch / Disconnect Teardown**: Automatically stops speaker playback and kills server stream processes when you disconnect or switch casting to another device.
 - **High-Fidelity Audio**: Direct 320kbps MP3 / AAC audio pipeline using `yt-dlp` and `ffmpeg`.
 - **Synology NAS / Docker Ready**: Runs as an always-on background container on Synology Container Manager with `host` networking for SSDP and DLNA.
 
@@ -103,7 +106,9 @@ You can configure the speaker IP and options in `config.json` or via environment
     "deviceName": "KEF LSX",
     "dialPort": 8098,
     "streamPort": 8099,
-    "hostIp": "auto"
+    "hostIp": "auto",
+    "autoStopOnSpeakerOff": true,
+    "autoStopOnDisconnect": true
   },
   "audio": {
     "format": "mp3",
@@ -121,6 +126,8 @@ You can configure the speaker IP and options in `config.json` or via environment
 - `DIAL_PORT`: DIAL discovery port (default: `8098`)
 - `STREAM_PORT`: Local audio streamer port (default: `8099`)
 - `HOST_IP`: Host LAN IP (default: `auto`)
+- `AUTO_STOP_ON_SPEAKER_OFF`: Auto-stop and notify phone when speaker turns off / pauses / switches input (default: `true`)
+- `AUTO_STOP_ON_DISCONNECT`: Auto-stop speaker playback and server stream when phone disconnects / switches device (default: `true`)
 
 ---
 

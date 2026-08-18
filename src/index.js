@@ -10,9 +10,16 @@ const fs = require('fs');
 const path = require('path');
 const dgram = require('dgram');
 const YouTubeCastReceiver = require('yt-cast-receiver').default || require('yt-cast-receiver');
-const { PlaylistRequestHandler } = require('yt-cast-receiver');
+const { PlaylistRequestHandler, Constants } = require('yt-cast-receiver');
 const StreamServer = require('./stream-server');
 const KefPlayer = require('./kef-player');
+
+function parseBool(val, defaultVal = true) {
+  if (val === undefined || val === null || val === '') return defaultVal;
+  if (typeof val === 'boolean') return val;
+  const s = String(val).trim().toLowerCase();
+  return s === 'true' || s === '1' || s === 'yes' || s === 'on';
+}
 
 // Custom PlaylistRequestHandler to bypass youtubei.js decipher errors
 class SimplePlaylistRequestHandler extends PlaylistRequestHandler {
@@ -45,7 +52,14 @@ let configPath = candidateConfigPaths.find(p => fs.existsSync(p));
 
 let config = {
   kef: { ip: process.env.KEF_IP || '', port: parseInt(process.env.KEF_PORT, 10) || 8080 },
-  receiver: { deviceName: 'KEF LSX', dialPort: 8098, streamPort: 8099, hostIp: 'auto' },
+  receiver: {
+    deviceName: 'KEF LSX',
+    dialPort: 8098,
+    streamPort: 8099,
+    hostIp: 'auto',
+    autoStopOnSpeakerOff: true,
+    autoStopOnDisconnect: true
+  },
   audio: {
     ytdlpPath: 'yt-dlp',
     ffmpegPath: 'ffmpeg'
@@ -74,6 +88,12 @@ if (process.env.DEVICE_NAME) config.receiver.deviceName = process.env.DEVICE_NAM
 if (process.env.DIAL_PORT) config.receiver.dialPort = parseInt(process.env.DIAL_PORT, 10);
 if (process.env.STREAM_PORT) config.receiver.streamPort = parseInt(process.env.STREAM_PORT, 10);
 if (process.env.HOST_IP) config.receiver.hostIp = process.env.HOST_IP;
+if (process.env.AUTO_STOP_ON_SPEAKER_OFF !== undefined) {
+  config.receiver.autoStopOnSpeakerOff = parseBool(process.env.AUTO_STOP_ON_SPEAKER_OFF, true);
+}
+if (process.env.AUTO_STOP_ON_DISCONNECT !== undefined) {
+  config.receiver.autoStopOnDisconnect = parseBool(process.env.AUTO_STOP_ON_DISCONNECT, true);
+}
 if (process.env.YTDLP_PATH) config.audio.ytdlpPath = process.env.YTDLP_PATH;
 if (process.env.FFMPEG_PATH) config.audio.ffmpegPath = process.env.FFMPEG_PATH;
 
@@ -139,10 +159,12 @@ async function bootstrap() {
   console.log('='.repeat(65));
   console.log('      KEF LSX YouTube Music Cast Bridge Server');
   console.log('='.repeat(65));
-  console.log(` Speaker Target : http://${config.kef.ip}:${config.kef.port}`);
-  console.log(` Device Name    : "${config.receiver.deviceName}"`);
-  console.log(` Local Stream IP: ${localIp}:${config.receiver.streamPort}`);
-  console.log(` DIAL Discovery : Port ${config.receiver.dialPort}`);
+  console.log(` Speaker Target   : http://${config.kef.ip}:${config.kef.port}`);
+  console.log(` Device Name      : "${config.receiver.deviceName}"`);
+  console.log(` Local Stream IP  : ${localIp}:${config.receiver.streamPort}`);
+  console.log(` DIAL Discovery   : Port ${config.receiver.dialPort}`);
+  console.log(` Auto-Stop (Off)  : ${config.receiver.autoStopOnSpeakerOff ? 'Enabled' : 'Disabled'}`);
+  console.log(` Auto-Stop (Disc) : ${config.receiver.autoStopOnDisconnect ? 'Enabled' : 'Disabled'}`);
   console.log('='.repeat(65));
 
   // 1. Start HTTP Audio Stream Server
@@ -160,7 +182,8 @@ async function bootstrap() {
     kefPort: config.kef.port,
     streamPort: config.receiver.streamPort,
     serverHost: localIp,
-    streamServer
+    streamServer,
+    autoStopOnSpeakerOff: config.receiver.autoStopOnSpeakerOff
   });
 
   // 3. Instantiate YouTubeCastReceiver
@@ -181,13 +204,24 @@ async function bootstrap() {
     logLevel: 'INFO'
   });
 
+  if (Constants && Constants.RESET_PLAYER_ON_DISCONNECT_POLICIES) {
+    receiver.setResetPlayerOnDisconnectPolicy(Constants.RESET_PLAYER_ON_DISCONNECT_POLICIES.ALL_DISCONNECTED);
+  }
+
   // 4. Sender Events
   receiver.on('senderConnect', (sender) => {
     console.log(`\n[Connected] Device connected: "${sender.name}"`);
   });
 
-  receiver.on('senderDisconnect', (sender, implicit) => {
+  receiver.on('senderDisconnect', async (sender, implicit) => {
     console.log(`\n[Disconnected] Device disconnected: "${sender.name}" (Implicit: ${implicit})`);
+    if (config.receiver.autoStopOnDisconnect) {
+      const connectedSenders = receiver.getConnectedSenders();
+      if (!connectedSenders || connectedSenders.length === 0) {
+        console.log('[Cast Receiver] All devices disconnected. Stopping speaker playback and stream...');
+        await player.stop().catch(() => { });
+      }
+    }
   });
 
   // 5. Pairing Code Service (Link with TV code)
@@ -202,7 +236,7 @@ async function bootstrap() {
   });
 
   pairingService.on('error', (err) => {
-    console.warn('⚠️ [Pairing Code Service] Error:', err.message);
+    console.warn('[Pairing Code Service] Error:', err.message);
   });
 
   // 6. Start Receiver & Pairing Service
@@ -223,7 +257,7 @@ async function bootstrap() {
     await receiver.stop().catch(() => { });
     streamServer.stop();
     await player.doStop().catch(() => { });
-    console.log('👋 Goodbye!');
+    console.log('Goodbye!');
     process.exit(0);
   };
 

@@ -7,7 +7,9 @@
     "deviceName": "KEF LSX",
     "dialPort": 8098,
     "streamPort": 8099,
-    "hostIp": "auto"
+    "hostIp": "auto",
+    "autoStopOnSpeakerOff": true,
+    "autoStopOnDisconnect": true
   },
   "audio": {
     "format": "mp3",
