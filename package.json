@@ -1,0 +1,23 @@
+{
+  "name": "kef-yt-cast-bridge",
+  "version": "1.0.0",
+  "description": "YouTube & YouTube Music Cast Receiver bridge for KEF LSX speakers via DLNA / UPnP",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test:upnp": "node tools/test_node.js"
+  },
+  "keywords": [
+    "kef",
+    "kef-lsx",
+    "youtube-music",
+    "cast",
+    "dlna",
+    "upnp"
+  ],
+  "author": "",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "yt-cast-receiver": "^2.1.0"
+  }
+}

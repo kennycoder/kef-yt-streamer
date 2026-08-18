@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  kef-yt-cast-bridge:
+    container_name: kef-yt-cast-bridge
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: kennycoder/kef-yt-streamer:latest
+    restart: unless-stopped
+    # host networking is critical for SSDP multicast discovery and DLNA on home LAN
+    network_mode: host
+    environment:
+      - NODE_ENV=production
+      - KEF_IP=192.168.0.10
+      - KEF_PORT=8080
+      - DEVICE_NAME=KEF LSX
+      - DIAL_PORT=8098
+      - STREAM_PORT=8099
+      - HOST_IP=auto
+      - DATA_DIR=/app/data
+    volumes:
+      - ./config.json:/app/config.json
+      - ./data:/app/data

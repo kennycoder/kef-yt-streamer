@@ -1,0 +1,9 @@
+node_modules
+npm-debug.log
+.git
+.gitignore
+.dockerignore
+*.log
+.node-persist
+data
+scratch
