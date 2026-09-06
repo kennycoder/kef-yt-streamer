@@ -9,6 +9,7 @@ const os = require('os');
 const fs = require('fs');
 const path = require('path');
 const dgram = require('dgram');
+const { spawnSync } = require('child_process');
 const YouTubeCastReceiver = require('yt-cast-receiver').default || require('yt-cast-receiver');
 const { PlaylistRequestHandler, Constants } = require('yt-cast-receiver');
 const StreamServer = require('./stream-server');
@@ -104,10 +105,13 @@ if (!config.kef || !config.kef.ip) {
   process.exit(1);
 }
 
-// Check if conda dev yt-dlp path exists locally if default is not in PATH
-if (config.audio.ytdlpPath === 'yt-dlp') {
-  console.error('Error: yt-dlp not found. Please install');
-}
+// Check if yt-dlp binary is accessible
+try {
+  const checkYtdlp = spawnSync(config.audio.ytdlpPath, ['--version'], { stdio: 'ignore' });
+  if (checkYtdlp.error || checkYtdlp.status !== 0) {
+    console.warn(`[Warning] yt-dlp binary "${config.audio.ytdlpPath}" was not found or failed to execute. Please ensure yt-dlp is installed and in PATH.`);
+  }
+} catch (e) { }
 
 function getLocalIp(targetIp = config.kef.ip) {
   if (config.receiver && config.receiver.hostIp && config.receiver.hostIp !== 'auto') {
