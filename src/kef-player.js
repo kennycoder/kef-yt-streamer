@@ -23,10 +23,13 @@ class KefPlayer extends Player {
     this.currentVideo = null;
     this.currentDuration = 0;
     this.currentPosition = 0;
+    this.streamStartPosition = 0;
     this.pollInterval = null;
     this.isPlaying = false;
     this.autoStopOnSpeakerOff = options.autoStopOnSpeakerOff !== undefined ? options.autoStopOnSpeakerOff : true;
     this.consecutivePollErrors = 0;
+    this.consecutiveStopped = 0;
+    this.playStartTime = 0;
   }
 
   setServerHost(host) {
@@ -35,7 +38,16 @@ class KefPlayer extends Player {
 
   async doPlay(video, position = 0) {
     try {
+      // 1. Immediately stop any active polling to prevent false "speaker stopped" during seek/load
+      this.stopPolling();
+      this.isPlaying = false;
+
       this.currentVideo = video;
+      this.streamStartPosition = position;
+      this.currentPosition = position;
+      this.consecutiveStopped = 0;
+      this.playStartTime = Date.now();
+
       console.log(`\n[KEF Player] Loading track: https://youtube.com/watch?v=${video.id} (Start position: ${position}s)`);
 
       // 1. Fetch track metadata
@@ -50,6 +62,7 @@ class KefPlayer extends Player {
       const thumbnail = meta ? meta.thumbnail : '';
       this.currentDuration = meta ? meta.duration : 0;
       this.currentPosition = position;
+      this.streamStartPosition = position;
 
       console.log(`[KEF Player] Now Playing: "${title}" by "${artist}" [${this.formatDuration(this.currentDuration)}]`);
 
@@ -64,11 +77,15 @@ class KefPlayer extends Player {
 
       this.isPlaying = true;
       this.consecutivePollErrors = 0;
+      this.consecutiveStopped = 0;
+      this.playStartTime = Date.now();
       this.startPolling();
 
       return true;
     } catch (err) {
       console.error('[KEF Player] Play error:', err.message);
+      this.isPlaying = false;
+      this.stopPolling();
       return false;
     }
   }
@@ -124,6 +141,7 @@ class KefPlayer extends Player {
       }
       this.isPlaying = false;
       this.currentPosition = 0;
+      this.streamStartPosition = 0;
       return true;
     } catch (err) {
       console.error('[KEF Player] Stop error:', err.message);
@@ -135,6 +153,7 @@ class KefPlayer extends Player {
     try {
       console.log(`[KEF Player] Seeking to ${position}s...`);
       this.currentPosition = position;
+      this.streamStartPosition = position;
       if (this.currentVideo) {
         return await this.doPlay(this.currentVideo, position);
       }
@@ -185,10 +204,10 @@ class KefPlayer extends Player {
   startPolling() {
     this.stopPolling();
     this.consecutivePollErrors = 0;
+    this.consecutiveStopped = 0;
+
     this.pollInterval = setInterval(async () => {
       if (!this.isPlaying) return;
-
-      this.currentPosition += 1;
 
       try {
         const info = await this.kef.getTransportInfo();
@@ -212,33 +231,51 @@ class KefPlayer extends Player {
         // Reset error count on successful communication
         this.consecutivePollErrors = 0;
 
-        if (pos && pos.position > 0) {
-          this.currentPosition = pos.position;
+        // Position tracking: add speaker-reported stream offset to stream start position
+        if (info && info.state === 'PLAYING') {
+          this.consecutiveStopped = 0;
+          if (pos && typeof pos.position === 'number') {
+            this.currentPosition = this.streamStartPosition + pos.position;
+          } else {
+            this.currentPosition += 1;
+          }
+          if (this.currentDuration > 0) {
+            this.currentPosition = Math.min(this.currentPosition, this.currentDuration);
+          }
         }
 
         // Check speaker playback state
         if (info && info.state === 'STOPPED' && this.isPlaying) {
-          if (this.currentDuration > 0 && this.currentPosition >= this.currentDuration - 3) {
+          // Check if track reached the end
+          if (this.currentDuration > 0 && this.currentPosition >= this.currentDuration - 5) {
             console.log('[KEF Player] Track finished. Advancing to next track in queue...');
             this.isPlaying = false;
             this.stopPolling();
             await this.next();
-          } else if (this.autoStopOnSpeakerOff) {
-            console.log('[KEF Player] Speaker stopped externally or source switched. Stopping playback and notifying sender...');
-            this.isPlaying = false;
-            this.stopPolling();
-            if (this.streamServer) {
-              this.streamServer.stopStream();
+          } else if (this.autoStopOnSpeakerOff && Date.now() - this.playStartTime > 5000) {
+            // Speaker is STOPPED during middle of track - require 3 consecutive checks (3s) to avoid buffering race
+            this.consecutiveStopped += 1;
+            if (this.consecutiveStopped >= 3 && this.isPlaying) {
+              console.log('[KEF Player] Speaker stopped externally or source switched. Stopping playback and notifying sender...');
+              this.isPlaying = false;
+              this.stopPolling();
+              if (this.streamServer) {
+                this.streamServer.stopStream();
+              }
+              await this.stop();
             }
-            await this.stop();
           }
         } else if (info && info.state === 'PAUSED_PLAYBACK' && this.isPlaying && this.autoStopOnSpeakerOff) {
+          this.consecutiveStopped = 0;
           console.log('[KEF Player] Speaker paused externally. Notifying sender...');
           this.isPlaying = false;
+          this.stopPolling();
           if (this.streamServer) {
             this.streamServer.stopStream();
           }
           await this.pause();
+        } else if (info && info.state === 'TRANSITIONING') {
+          this.consecutiveStopped = 0;
         }
       } catch (e) {
         this.consecutivePollErrors += 1;
