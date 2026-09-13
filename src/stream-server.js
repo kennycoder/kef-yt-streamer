@@ -180,6 +180,7 @@ class StreamServer extends EventEmitter {
 
         const ffmpegArgs = [];
         const useDirectUrl = Boolean(meta.streamUrl);
+        let ytdlp = null;
 
         if (useDirectUrl) {
           // Fast path: Stream direct audio CDN URL with FFmpeg, avoiding second yt-dlp process
@@ -213,7 +214,7 @@ class StreamServer extends EventEmitter {
             `https://www.youtube.com/watch?v=${videoId}`
           ];
 
-          const ytdlp = spawn(this.ytdlpPath, ytdlpArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+          ytdlp = spawn(this.ytdlpPath, ytdlpArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
           this.currentYtdlpProc = ytdlp;
 
           ytdlp.on('error', (err) => {
