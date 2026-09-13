@@ -77,17 +77,24 @@ class KefPlayer extends Player {
     try {
       console.log('[KEF Player] Pausing playback...');
       this.isPlaying = false;
+      this.stopPolling();
 
-      // Stop active ffmpeg streaming
+      // Pause speaker playback (kef.pause automatically falls back to stop for live/chunked streams)
+      try {
+        await this.kef.pause();
+      } catch (err) {
+        console.warn('[KEF Player] Speaker pause failed, stopping speaker:', err.message);
+        await this.kef.stop().catch(() => { });
+      }
+
+      // Stop active transcoding and network stream
       if (this.streamServer) {
         this.streamServer.stopStream();
       }
 
-      await this.kef.pause();
       return true;
     } catch (err) {
       console.warn('[KEF Player] Pause error handled:', err.message);
-      await this.kef.stop().catch(() => { });
       return true;
     }
   }
@@ -111,10 +118,10 @@ class KefPlayer extends Player {
     try {
       console.log('[KEF Player] Stopping playback...');
       this.stopPolling();
+      await this.kef.stop().catch(() => { });
       if (this.streamServer) {
         this.streamServer.stopStream();
       }
-      await this.kef.stop().catch(() => { });
       this.isPlaying = false;
       this.currentPosition = 0;
       return true;

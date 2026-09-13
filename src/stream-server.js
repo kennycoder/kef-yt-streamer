@@ -29,17 +29,41 @@ class StreamServer {
   }
 
   stopStream() {
-    if (this.currentYtdlpProc) {
-      try { this.currentYtdlpProc.kill('SIGTERM'); } catch (e) { }
-      this.currentYtdlpProc = null;
+    const ytdlp = this.currentYtdlpProc;
+    const ffmpeg = this.currentFfmpegProc;
+    const res = this.currentResponse;
+
+    this.currentYtdlpProc = null;
+    this.currentFfmpegProc = null;
+    this.currentResponse = null;
+
+    if (ytdlp) {
+      try {
+        if (ytdlp.stdout) {
+          ytdlp.stdout.unpipe();
+          ytdlp.stdout.destroy();
+        }
+        ytdlp.kill('SIGTERM');
+      } catch (e) { }
     }
-    if (this.currentFfmpegProc) {
-      try { this.currentFfmpegProc.kill('SIGTERM'); } catch (e) { }
-      this.currentFfmpegProc = null;
+
+    if (ffmpeg) {
+      try {
+        if (ffmpeg.stdin) {
+          ffmpeg.stdin.destroy();
+        }
+        if (ffmpeg.stdout) {
+          ffmpeg.stdout.unpipe();
+          ffmpeg.stdout.destroy();
+        }
+        ffmpeg.kill('SIGTERM');
+      } catch (e) { }
     }
-    if (this.currentResponse && !this.currentResponse.writableEnded) {
-      try { this.currentResponse.end(); } catch (e) { }
-      this.currentResponse = null;
+
+    if (res && !res.writableEnded) {
+      try {
+        res.end();
+      } catch (e) { }
     }
   }
 
@@ -91,6 +115,17 @@ class StreamServer {
 
     const urlParts = req.url.split('?')[0].split('/');
     if (urlParts[1] === 'stream' && urlParts[2]) {
+      if (req.method === 'HEAD') {
+        res.writeHead(200, {
+          'Content-Type': 'audio/mpeg',
+          'Accept-Ranges': 'none',
+          'Server': 'KefYtStreamServer/1.0',
+          'Connection': 'close'
+        });
+        res.end();
+        return;
+      }
+
       const videoId = urlParts[2].replace(/\.(mp3|m4a|wav|aac)$/, '');
       const urlParams = new URL(req.url, `http://localhost:${this.port}`).searchParams;
       const startPos = parseInt(urlParams.get('pos') || '0', 10);
@@ -98,7 +133,7 @@ class StreamServer {
       try {
         const meta = await this.fetchVideoMeta(videoId);
 
-        // Terminate any previous active stream
+        // Terminate any previous active stream cleanly
         this.stopStream();
         this.currentResponse = res;
 
@@ -125,6 +160,14 @@ class StreamServer {
         const ytdlp = spawn(this.ytdlpPath, ytdlpArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
         this.currentYtdlpProc = ytdlp;
 
+        // Prevent unhandled error crashes on streams / sockets (e.g. EPIPE, ECONNRESET)
+        ytdlp.on('error', (err) => {
+          if (err.code !== 'EPIPE') console.warn('[StreamServer] yt-dlp error:', err.message);
+        });
+        if (ytdlp.stdout) {
+          ytdlp.stdout.on('error', () => { });
+        }
+
         const ffmpegArgs = [];
         if (startPos > 0) {
           ffmpegArgs.push('-ss', String(startPos));
@@ -144,6 +187,26 @@ class StreamServer {
         const ffmpeg = spawn(this.ffmpegPath, ffmpegArgs, { stdio: ['pipe', 'pipe', 'ignore'] });
         this.currentFfmpegProc = ffmpeg;
 
+        ffmpeg.on('error', (err) => {
+          if (err.code !== 'EPIPE') console.warn('[StreamServer] ffmpeg error:', err.message);
+        });
+        if (ffmpeg.stdin) {
+          ffmpeg.stdin.on('error', () => { });
+        }
+        if (ffmpeg.stdout) {
+          ffmpeg.stdout.on('error', () => { });
+        }
+
+        res.on('error', (err) => {
+          if (err.code !== 'EPIPE' && err.code !== 'ECONNRESET') {
+            console.warn('[StreamServer] Response socket error:', err.message);
+          }
+        });
+        req.on('error', () => { });
+        if (req.socket) {
+          req.socket.on('error', () => { });
+        }
+
         ytdlp.stdout.pipe(ffmpeg.stdin);
         ffmpeg.stdout.pipe(res);
 
@@ -154,23 +217,19 @@ class StreamServer {
         });
 
         const cleanup = () => {
-          if (this.currentYtdlpProc === ytdlp) {
-            try { ytdlp.kill('SIGTERM'); } catch (e) { }
-            this.currentYtdlpProc = null;
-          }
-          if (this.currentFfmpegProc === ffmpeg) {
-            try { ffmpeg.kill('SIGTERM'); } catch (e) { }
-            this.currentFfmpegProc = null;
-          }
-          if (this.currentResponse === res) {
-            this.currentResponse = null;
+          if (this.currentYtdlpProc === ytdlp || this.currentFfmpegProc === ffmpeg || this.currentResponse === res) {
+            this.stopStream();
           }
         };
 
         req.on('close', cleanup);
         ffmpeg.on('close', cleanup);
         ytdlp.on('close', () => {
-          try { ffmpeg.stdin.end(); } catch (e) { }
+          try {
+            if (ffmpeg.stdin && !ffmpeg.stdin.destroyed && ffmpeg.stdin.writable) {
+              ffmpeg.stdin.end();
+            }
+          } catch (e) { }
         });
 
       } catch (err) {

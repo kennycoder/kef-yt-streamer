@@ -267,6 +267,19 @@ async function bootstrap() {
 
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+
+  process.on('uncaughtException', (err) => {
+    if (err.code === 'EPIPE' || err.code === 'ECONNRESET') {
+      // Ignore broken pipe or connection resets from aborted media streaming
+      return;
+    }
+    console.error('Fatal uncaught exception:', err);
+    process.exit(1);
+  });
+
+  process.on('unhandledRejection', (reason) => {
+    console.warn('[Warning] Unhandled promise rejection:', reason);
+  });
 }
 
 bootstrap().catch((err) => {

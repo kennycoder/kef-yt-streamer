@@ -107,9 +107,14 @@ class KefUpnpClient {
         { InstanceID: 0 }
       );
     } catch (err) {
-      if (err.message.includes('701') || err.message.includes('Transition not available')) {
-        // Speaker cannot pause live stream, fallback to stop
-        return await this.stop();
+      if (
+        err.message.includes('701') ||
+        err.message.includes('501') ||
+        err.message.includes('Transition not available') ||
+        err.message.includes('Action Failed')
+      ) {
+        // Speaker cannot pause live/chunked HTTP stream, fallback to stop
+        return await this.stop().catch(() => { });
       }
       throw err;
     }
