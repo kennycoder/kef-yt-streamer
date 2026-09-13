@@ -79,6 +79,11 @@ class KefPlayer extends Player {
       this.consecutivePollErrors = 0;
       this.consecutiveStopped = 0;
       this.playStartTime = Date.now();
+
+      // 4. Wait for audio to actively start streaming and KEF to enter PLAYING state
+      // (Keeps YouTube Music in native LOADING spinner at 0:00 until audio actually starts)
+      await this.waitForPlaybackStart(6000);
+
       this.startPolling();
 
       return true;
@@ -88,6 +93,31 @@ class KefPlayer extends Player {
       this.stopPolling();
       return false;
     }
+  }
+
+  async waitForPlaybackStart(timeoutMs = 6000) {
+    const startTime = Date.now();
+
+    // 1. Wait for streamServer to start pumping audio chunks
+    if (this.streamServer) {
+      await this.streamServer.waitForStreaming(timeoutMs);
+    }
+
+    // 2. Poll KEF speaker state until it transitions to PLAYING
+    const remainingTime = Math.max(1000, timeoutMs - (Date.now() - startTime));
+    const speakerWaitStart = Date.now();
+
+    while (Date.now() - speakerWaitStart < remainingTime) {
+      try {
+        const info = await this.kef.getTransportInfo();
+        if (info && info.state === 'PLAYING') {
+          return true;
+        }
+      } catch (e) { }
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+
+    return true;
   }
 
   async doPause() {

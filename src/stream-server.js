@@ -4,10 +4,12 @@
  */
 
 const http = require('http');
+const EventEmitter = require('events');
 const { spawn, execFile } = require('child_process');
 
-class StreamServer {
+class StreamServer extends EventEmitter {
   constructor(options = {}) {
+    super();
     this.port = options.port || 8099;
     this.ytdlpPath = options.ytdlpPath || 'yt-dlp';
     this.ffmpegPath = options.ffmpegPath || 'ffmpeg';
@@ -15,6 +17,7 @@ class StreamServer {
     this.currentFfmpegProc = null;
     this.currentYtdlpProc = null;
     this.currentResponse = null;
+    this.isCurrentlyStreaming = false;
     this.metaCache = new Map();
   }
 
@@ -36,6 +39,8 @@ class StreamServer {
     this.currentYtdlpProc = null;
     this.currentFfmpegProc = null;
     this.currentResponse = null;
+
+    this.isCurrentlyStreaming = false;
 
     if (ytdlp) {
       try {
@@ -67,6 +72,25 @@ class StreamServer {
     }
   }
 
+  waitForStreaming(timeoutMs = 6000) {
+    if (this.isCurrentlyStreaming) {
+      return Promise.resolve(true);
+    }
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.removeListener('streaming', onStreaming);
+        resolve(false);
+      }, timeoutMs);
+
+      const onStreaming = () => {
+        clearTimeout(timer);
+        resolve(true);
+      };
+
+      this.once('streaming', onStreaming);
+    });
+  }
+
   stop() {
     this.stopStream();
     if (this.server) {
@@ -83,7 +107,7 @@ class StreamServer {
       const args = [
         '-j',
         '--no-playlist',
-        '--extractor-args', 'youtube:player_client=android,web',
+        '--extractor-args', 'youtube:player_client=android',
         '-f', 'bestaudio[ext=m4a]/ba/b',
         `https://www.youtube.com/watch?v=${videoId}`
       ];
@@ -92,6 +116,12 @@ class StreamServer {
         if (err) return reject(err);
         try {
           const data = JSON.parse(stdout);
+          let httpHeaders = '';
+          if (data.http_headers) {
+            httpHeaders = Object.entries(data.http_headers)
+              .map(([k, v]) => `${k}: ${v}\r\n`)
+              .join('');
+          }
           const meta = {
             id: data.id,
             title: data.title || 'Unknown Title',
@@ -99,7 +129,8 @@ class StreamServer {
             album: data.album || '',
             duration: data.duration || 0,
             thumbnail: data.thumbnail || '',
-            streamUrl: data.url
+            streamUrl: data.url,
+            httpHeaders
           };
           this.metaCache.set(videoId, meta);
           resolve(meta);
@@ -147,44 +178,73 @@ class StreamServer {
           'icy-name': `${meta.artist} - ${meta.title}`
         });
 
-        // Pipeline: yt-dlp with android client args piped directly to ffmpeg
-        const ytdlpArgs = [
-          '-o', '-',
-          '-q',
-          '--no-playlist',
-          '--extractor-args', 'youtube:player_client=android,web',
-          '-f', 'bestaudio[ext=m4a]/ba/b',
-          `https://www.youtube.com/watch?v=${videoId}`
-        ];
-
-        const ytdlp = spawn(this.ytdlpPath, ytdlpArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
-        this.currentYtdlpProc = ytdlp;
-
-        // Prevent unhandled error crashes on streams / sockets (e.g. EPIPE, ECONNRESET)
-        ytdlp.on('error', (err) => {
-          if (err.code !== 'EPIPE') console.warn('[StreamServer] yt-dlp error:', err.message);
-        });
-        if (ytdlp.stdout) {
-          ytdlp.stdout.on('error', () => { });
-        }
-
         const ffmpegArgs = [];
-        if (startPos > 0) {
-          ffmpegArgs.push('-ss', String(startPos));
+        const useDirectUrl = Boolean(meta.streamUrl);
+
+        if (useDirectUrl) {
+          // Fast path: Stream direct audio CDN URL with FFmpeg, avoiding second yt-dlp process
+          if (meta.httpHeaders) {
+            ffmpegArgs.push('-headers', meta.httpHeaders);
+          }
+          if (startPos > 0) {
+            ffmpegArgs.push('-ss', String(startPos));
+          }
+          ffmpegArgs.push(
+            '-reconnect', '1',
+            '-reconnect_streamed', '1',
+            '-reconnect_delay_max', '5',
+            '-i', meta.streamUrl,
+            '-vn',
+            '-acodec', 'libmp3lame',
+            '-b:a', '320k',
+            '-ar', '44100',
+            '-ac', '2',
+            '-f', 'mp3',
+            'pipe:1'
+          );
+        } else {
+          // Fallback pipeline: yt-dlp piped into ffmpeg
+          const ytdlpArgs = [
+            '-o', '-',
+            '-q',
+            '--no-playlist',
+            '--extractor-args', 'youtube:player_client=android',
+            '-f', 'bestaudio[ext=m4a]/ba/b',
+            `https://www.youtube.com/watch?v=${videoId}`
+          ];
+
+          const ytdlp = spawn(this.ytdlpPath, ytdlpArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+          this.currentYtdlpProc = ytdlp;
+
+          ytdlp.on('error', (err) => {
+            if (err.code !== 'EPIPE') console.warn('[StreamServer] yt-dlp error:', err.message);
+          });
+          if (ytdlp.stdout) {
+            ytdlp.stdout.on('error', () => { });
+          }
+
+          ytdlp.stderr.on('data', (d) => {
+            const msg = d.toString();
+            if (msg.includes('ERROR')) console.error('[yt-dlp]', msg.trim());
+          });
+
+          if (startPos > 0) {
+            ffmpegArgs.push('-ss', String(startPos));
+          }
+
+          ffmpegArgs.push(
+            '-i', 'pipe:0',
+            '-vn',
+            '-acodec', 'libmp3lame',
+            '-b:a', '320k',
+            '-ar', '44100',
+            '-ac', '2',
+            '-f', 'mp3',
+            'pipe:1'
+          );
         }
 
-        ffmpegArgs.push(
-          '-i', 'pipe:0',
-          '-vn',
-          '-acodec', 'libmp3lame',
-          '-b:a', '320k',
-          '-ar', '44100',
-          '-ac', '2',
-          '-f', 'mp3',
-          'pipe:1'
-        );
-
-        const ffmpeg = spawn(this.ffmpegPath, ffmpegArgs, { stdio: ['pipe', 'pipe', 'ignore'] });
+        const ffmpeg = spawn(this.ffmpegPath, ffmpegArgs, { stdio: [useDirectUrl ? 'ignore' : 'pipe', 'pipe', 'ignore'] });
         this.currentFfmpegProc = ffmpeg;
 
         ffmpeg.on('error', (err) => {
@@ -207,30 +267,36 @@ class StreamServer {
           req.socket.on('error', () => { });
         }
 
-        ytdlp.stdout.pipe(ffmpeg.stdin);
-        ffmpeg.stdout.pipe(res);
-
-        ytdlp.stderr.on('data', (d) => {
-          // Log any extraction warnings
-          const msg = d.toString();
-          if (msg.includes('ERROR')) console.error('[yt-dlp]', msg.trim());
+        let streamNotified = false;
+        ffmpeg.stdout.on('data', () => {
+          if (!streamNotified) {
+            streamNotified = true;
+            this.isCurrentlyStreaming = true;
+            this.emit('streaming', { videoId, startPos });
+          }
         });
 
+        if (!useDirectUrl && this.currentYtdlpProc) {
+          this.currentYtdlpProc.stdout.pipe(ffmpeg.stdin);
+          this.currentYtdlpProc.on('close', () => {
+            try {
+              if (ffmpeg.stdin && !ffmpeg.stdin.destroyed && ffmpeg.stdin.writable) {
+                ffmpeg.stdin.end();
+              }
+            } catch (e) { }
+          });
+        }
+
+        ffmpeg.stdout.pipe(res);
+
         const cleanup = () => {
-          if (this.currentYtdlpProc === ytdlp || this.currentFfmpegProc === ffmpeg || this.currentResponse === res) {
+          if ((ytdlp && this.currentYtdlpProc === ytdlp) || this.currentFfmpegProc === ffmpeg || this.currentResponse === res) {
             this.stopStream();
           }
         };
 
         req.on('close', cleanup);
         ffmpeg.on('close', cleanup);
-        ytdlp.on('close', () => {
-          try {
-            if (ffmpeg.stdin && !ffmpeg.stdin.destroyed && ffmpeg.stdin.writable) {
-              ffmpeg.stdin.end();
-            }
-          } catch (e) { }
-        });
 
       } catch (err) {
         console.error(`[StreamServer] Error streaming video ${videoId}:`, err.message);
