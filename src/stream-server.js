@@ -18,7 +18,16 @@ class StreamServer extends EventEmitter {
     this.currentYtdlpProc = null;
     this.currentResponse = null;
     this.isCurrentlyStreaming = false;
+    this.streamCompleted = false;
     this.metaCache = new Map();
+  }
+
+  hasStreamEnded() {
+    return this.streamCompleted;
+  }
+
+  resetStreamEnded() {
+    this.streamCompleted = false;
   }
 
   start() {
@@ -93,6 +102,7 @@ class StreamServer extends EventEmitter {
 
   stop() {
     this.stopStream();
+    this.streamCompleted = false;
     if (this.server) {
       this.server.close();
     }
@@ -100,7 +110,10 @@ class StreamServer extends EventEmitter {
 
   async fetchVideoMeta(videoId) {
     if (this.metaCache.has(videoId)) {
-      return this.metaCache.get(videoId);
+      const cached = this.metaCache.get(videoId);
+      if (cached && Date.now() - cached.timestamp < 2 * 3600 * 1000) {
+        return cached.meta;
+      }
     }
 
     return new Promise((resolve, reject) => {
@@ -112,7 +125,7 @@ class StreamServer extends EventEmitter {
         `https://www.youtube.com/watch?v=${videoId}`
       ];
 
-      execFile(this.ytdlpPath, args, { timeout: 15000 }, (err, stdout, stderr) => {
+      execFile(this.ytdlpPath, args, { timeout: 15000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
         if (err) return reject(err);
         try {
           const data = JSON.parse(stdout);
@@ -132,7 +145,7 @@ class StreamServer extends EventEmitter {
             streamUrl: data.url,
             httpHeaders
           };
-          this.metaCache.set(videoId, meta);
+          this.metaCache.set(videoId, { meta, timestamp: Date.now() });
           resolve(meta);
         } catch (e) {
           reject(e);
@@ -166,6 +179,7 @@ class StreamServer extends EventEmitter {
 
         // Terminate any previous active stream cleanly
         this.stopStream();
+        this.streamCompleted = false;
         this.currentResponse = res;
 
         console.log(`[StreamServer] Streaming "${meta.title}" (${meta.artist}) to speaker...`);
@@ -297,7 +311,14 @@ class StreamServer extends EventEmitter {
         };
 
         req.on('close', cleanup);
-        ffmpeg.on('close', cleanup);
+        ffmpeg.on('close', (code, signal) => {
+          if (code === 0 && !signal) {
+            this.streamCompleted = true;
+            console.log(`[StreamServer] Stream for "${meta.title}" finished sending to speaker (EOF).`);
+            this.emit('streamEnded', { videoId });
+          }
+          cleanup();
+        });
 
       } catch (err) {
         console.error(`[StreamServer] Error streaming video ${videoId}:`, err.message);

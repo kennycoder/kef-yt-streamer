@@ -13,7 +13,7 @@ class KefUpnpClient {
     this.port = port;
   }
 
-  async sendSoap(servicePath, serviceType, action, args = {}) {
+  async sendSoap(servicePath, serviceType, action, args = {}, retries = 1) {
     let argsXml = '';
     for (const [key, val] of Object.entries(args)) {
       const escaped = String(val == null ? '' : val)
@@ -29,10 +29,10 @@ class KefUpnpClient {
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
   <s:Body>
     <u:${action} xmlns:u="${serviceType}">
-      {argsXml}
+      ${argsXml}
     </u:${action}>
   </s:Body>
-</s:Envelope>`.replace('{argsXml}', argsXml);
+</s:Envelope>`;
 
     const headers = {
       'Content-Type': 'text/xml; charset="utf-8"',
@@ -40,50 +40,92 @@ class KefUpnpClient {
       'Content-Length': Buffer.byteLength(soapBody, 'utf8')
     };
 
-    return new Promise((resolve, reject) => {
+    const attempt = () => new Promise((resolve, reject) => {
+      let settled = false;
+      const done = (err, data) => {
+        if (settled) return;
+        settled = true;
+        if (err) reject(err);
+        else resolve(data);
+      };
+
       const req = http.request({
         host: this.ip,
         port: this.port,
         path: servicePath,
         method: 'POST',
         headers,
-        timeout: 4000
+        timeout: 6000
       }, (res) => {
         let data = '';
         res.on('data', chunk => { data += chunk; });
         res.on('end', () => {
           if (res.statusCode >= 200 && res.statusCode < 300) {
-            resolve(data);
+            done(null, data);
           } else {
-            reject(new Error(`SOAP HTTP ${res.statusCode}: ${data}`));
+            done(new Error(`SOAP HTTP ${res.statusCode}: ${data}`));
           }
         });
+        res.on('error', (err) => done(err));
       });
 
-      req.on('error', (err) => reject(err));
+      req.on('error', (err) => done(err));
       req.on('timeout', () => {
         req.destroy();
-        reject(new Error('SOAP request timed out'));
+        done(new Error(`SOAP request timed out (${action})`));
       });
 
       req.write(soapBody);
       req.end();
     });
+
+    try {
+      return await attempt();
+    } catch (err) {
+      const isTransient = err.message && (
+        err.message.includes('socket hang up') ||
+        err.code === 'ECONNRESET' ||
+        err.code === 'EPIPE' ||
+        err.code === 'ETIMEDOUT'
+      );
+      if (retries > 0 && isTransient) {
+        await new Promise(resolve => setTimeout(resolve, 250));
+        return this.sendSoap(servicePath, serviceType, action, args, retries - 1);
+      }
+      throw err;
+    }
   }
 
   // --- AVTransport Actions ---
 
   async setAVTransportURI(uri, metadataXml = '') {
-    return this.sendSoap(
-      '/AVTransport/ctrl',
-      'urn:schemas-upnp-org:service:AVTransport:1',
-      'SetAVTransportURI',
-      {
-        InstanceID: 0,
-        CurrentURI: uri,
-        CurrentURIMetaData: metadataXml
+    try {
+      return await this.sendSoap(
+        '/AVTransport/ctrl',
+        'urn:schemas-upnp-org:service:AVTransport:1',
+        'SetAVTransportURI',
+        {
+          InstanceID: 0,
+          CurrentURI: uri,
+          CurrentURIMetaData: metadataXml
+        }
+      );
+    } catch (err) {
+      if (metadataXml) {
+        console.warn(`[KEF UPnP] SetAVTransportURI failed with metadata (${err.message}), retrying without metadata...`);
+        return await this.sendSoap(
+          '/AVTransport/ctrl',
+          'urn:schemas-upnp-org:service:AVTransport:1',
+          'SetAVTransportURI',
+          {
+            InstanceID: 0,
+            CurrentURI: uri,
+            CurrentURIMetaData: ''
+          }
+        );
       }
-    );
+      throw err;
+    }
   }
 
   async play() {

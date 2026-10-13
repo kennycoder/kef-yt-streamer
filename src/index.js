@@ -26,16 +26,57 @@ function parseBool(val, defaultVal = true) {
 class SimplePlaylistRequestHandler extends PlaylistRequestHandler {
   async getPreviousNextVideos(target, playlist) {
     const videoIds = (playlist && playlist.videoIds) ? playlist.videoIds : [];
-    const currentIndex = videoIds.indexOf(target.id);
+    let currentIndex = target?.context?.index;
+    if (typeof currentIndex !== 'number' || isNaN(currentIndex) || currentIndex < 0) {
+      currentIndex = videoIds.indexOf(target.id);
+    }
+
+    const playlistId = playlist?.id || target?.context?.playlistId || null;
+    const client = target?.client;
+    const params = target?.context?.params;
+    const ctt = target?.context?.ctt;
+
+    // Ensure target itself has a valid context object
+    if (!target.context) {
+      target.context = {};
+    }
+    if (typeof target.context.index !== 'number' || isNaN(target.context.index) || target.context.index < 0) {
+      target.context.index = currentIndex >= 0 ? currentIndex : 0;
+    }
+    if (!target.context.playlistId && playlistId) {
+      target.context.playlistId = playlistId;
+    }
+
     let previous = null;
     let next = null;
 
-    if (currentIndex > 0) {
-      previous = { id: videoIds[currentIndex - 1], client: target.client };
+    if (currentIndex > 0 && currentIndex < videoIds.length) {
+      previous = {
+        id: videoIds[currentIndex - 1],
+        client,
+        context: {
+          playlistId,
+          index: currentIndex - 1,
+          ...(params ? { params } : {}),
+          ...(ctt ? { ctt } : {})
+        }
+      };
     }
+
     if (currentIndex >= 0 && currentIndex < videoIds.length - 1) {
-      next = { id: videoIds[currentIndex + 1], client: target.client };
+      next = {
+        id: videoIds[currentIndex + 1],
+        client,
+        context: {
+          playlistId,
+          index: currentIndex + 1,
+          ...(params ? { params } : {}),
+          ...(ctt ? { ctt } : {})
+        }
+      };
     }
+
+    console.log(`[Queue] Track: ${target.id} (Queue pos: ${currentIndex >= 0 ? currentIndex + 1 : '?'}/${videoIds.length || 1}) -> Next: ${next ? next.id : '(end of queue)'}`);
 
     return { previous, next };
   }
